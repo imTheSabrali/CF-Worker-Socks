@@ -9,28 +9,26 @@ const logcb= (...args)=>console.log.bind(this,...args);
 const errcb= (...args)=>console.error.bind(this,...args);
 const opts={}, cache={};
 
+const CFDOMAN=[];
 const CIDR4=['173.245.48.0/20','103.21.244.0/22','103.22.200.0/22','103.31.4.0/22','141.101.64.0/18','108.162.192.0/18','190.93.240.0/20',
 '188.114.96.0/20','197.234.240.0/22','198.41.128.0/17','162.158.0.0/15','104.16.0.0/13','104.24.0.0/14','172.64.0.0/13', '131.0.72.0/22'];
 const CIDR6=['2400:cb00::/32','2606:4700::/32','2803:f800::/32','2405:b500::/32','2405:8100::/32','2a06:98c0::/29','2c0f:f248::/32'];
 
 const ADDR4=CIDR4.map(cidr=>{
 	const [addr, mask]=cidr.split('/');
-	return {
-		m: (0xffffffff<<32-Number(mask))>>>0,
-		a: addr.split('.').map(Number).reduce((s,b,i)=>s+=(b<<24-8*i),0)
-	}
+	return {m: (0xffffffff<<32-Number(mask))>>>0, a: addr.split('.').map(Number).reduce((s,b,i)=>s+=(b<<24-8*i),0)};
 });
 const ADDR6=CIDR6.map(cidr=>{
 	const [addr, mask]=cidr.split('/');
-	return {m: mask, s: addr.split(':').map(p=>parseInt(p,16).toString(2).padStart(16,'0')).join('').slice(0,mask)}
+	return {m: mask, s: addr.split(':').map(p=>parseInt(p,16).toString(2).padStart(16,'0')).join('').slice(0,mask)};
 });
-const ipInCidr=ip=>{
+const ipInCFCidr=ip=>{
 	if(ip.indexOf(':')==-1){
 		const ipa=ip.split('.').map(Number);
-		return ADDR4.some(({a,m})=>(ipa.reduce((s,b,i)=>s+=(b<<24-8*i),0)&m)===(a&m));
-	}else {
+		return {cf:ADDR4.some(({a,m})=>(ipa.reduce((s,b,i)=>s+=(b<<24-8*i),0)&m)===(a&m)), ip:ip};
+	} else {
 		const ips=ip.split(':').map(p=>parseInt(p,16).toString(2).padStart(16,'0')).join('');
-		return ADDR6.some(({s,m})=>ips.slice(0, m)===s);
+		return {cf:ADDR6.some(({s,m})=>ips.slice(0, m)===s), ip:ip};
 	}
 }
 
@@ -40,19 +38,21 @@ const dns= host=>new Promise((res, rej)=>{
 		let data='';
 		r.on('data', chunk=>data += chunk).on('end', ()=>{
 			const d=JSON.parse(data);
-			if(d.Status===0 && d.Answer && d.Answer.length>0) res(d.Answer.map(a=>a.data));
+			if(d.Status===0 && d.Answer && d.Answer.length>0) res(d.Answer.map(a=>a.data).find(ip=>/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)));
 			else rej(new Error('no ipv4 addr'));
 		});
 	}).on('error',error=>rej(error)).end();
 });
 const isCFIP= (host,ATYP)=>new Promise((res,rej)=>{
-	if(cache[host]==undefined){
-		if(ATYP==0x01||ATYP==0x04) res(cache[host]=ipInCidr(host));
-		else if(ATYP==0x03)	dns(host).then(ips=>res(cache[host]=ips.some(ip=>ipInCidr(ip)))).catch(e=>res(cache[host]=false));
+	if(CFDOMAN.includes(host)) res({cf:true,ip:host});
+	else if(cache[host]==undefined){
+		if(ATYP==0x01||ATYP==0x04) res(cache[host]=ipInCFCidr(host));
+		else if(ATYP==0x03)	dns(host).then(ip=>res(cache[host]=ipInCFCidr(ip))).catch(e=>res({cf:false,ip:host}));
 	}else res(cache[host]);
 });
 
-const socks= async({domain,psw,sport=1080,sbind='127.0.0.1',wkip,byip})=>{
+const socks= async({domain,psw,sport=1080,sbind='127.0.0.1',wkip,byip,cfhs=[]})=>{
+	Object.assign(CFDOMAN, cfhs);
 	if(wkip) Object.assign(opts,{lookup:(host,opts,cb)=>cb(null,wkip,wkip.indexOf(':')==-1?4:6)});
 	const url='wss://'+domain;	
 	net.createServer(socks=>socks.once('data', data=>{
@@ -68,16 +68,16 @@ const socks= async({domain,psw,sport=1080,sbind='127.0.0.1',wkip,byip})=>{
 					(ATYP==0x03? head.slice(5,-2).toString('utf8'):''));//DOMAIN
 				const port= head.slice(-2).readUInt16BE(0);
 
-				isCFIP(host,ATYP).then(cf=>{
+				isCFIP(host,ATYP).then(({cf,ip})=>{
 					new Promise((res,rej)=>{
-						if(cf && !byip) net.connect(port, wkip?wkip:host, function(){res(this);}).on('error',rej);
+						if(cf && !byip) net.connect(port, wkip?wkip:ip, function(){res(this);}).on('error',rej);
 						else new WebSocket(url, opts).on('open', function(e){
-							this.send(JSON.stringify({hostname:cf?byip:host, port, psw}));
+							this.send(JSON.stringify({hostname:cf?byip:ip, port, psw}));
 							res(createWebSocketStream(this));
 						}).on('error',e=>rej);
 					}).then(s=>{
 						socks.write((head[1]=0x00,head));
-						logcb('conn: ')(host,port);
+						logcb('conn:')({host,port,cf});
 						socks.pipe(s).on('error',e=>errcb('E1:')(e.message)).pipe(socks).on('error', e=>errcb('E2:')(e.message));
 					}).catch(e=>{
 						errcb('connect-catch:')(e.message);

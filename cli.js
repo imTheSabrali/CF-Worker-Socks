@@ -48,7 +48,7 @@ const dns= host=>new Promise((res, rej)=>{
 const isCFIP= (host,ATYP)=>new Promise((res,rej)=>{
 	if(cache[host]==undefined){
 		if(ATYP==0x01||ATYP==0x04) res(cache[host]=ipInCidr(host));
-		else if(ATYP==0x03)	dns(host).then(ips=>res(cache[host]=ipInCidr(ips[0]))).catch(e=>res(cache[host]=false));
+		else if(ATYP==0x03)	dns(host).then(ips=>res(cache[host]=ips.some(ip=>ipInCidr(ip)))).catch(e=>res(cache[host]=false));
 	}else res(cache[host]);
 });
 
